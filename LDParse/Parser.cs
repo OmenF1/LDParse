@@ -1,5 +1,6 @@
 ﻿using System.Buffers.Binary;
 using System.Text;
+using System.Text.Json;
 using System.Threading.Channels;
 using LDParse.Classes;
 
@@ -16,33 +17,53 @@ namespace LDParse
             header = new Header();
         }
 
-        public bool Parse()
+        public string Parse()
         {
+            if (!File.Exists(_filePath))
+            {
+                return "filepath not found.";
+            }
             try
             {
                 using var fs = File.OpenRead(_filePath);
                 using var reader = new BinaryReader(fs, Encoding.ASCII);
                 if (!ReadHeader(reader))
                 {
-                    return false;
+                    fs.Close();
+                    reader.Close();
+                    return "Error reading file header.";
                 }
 
                 List<LDParse.Classes.Channel> channels = new List<LDParse.Classes.Channel>();
-                ushort channelAddress = header.ChannelMetaPointer;
+                UInt32 channelAddress = header.ChannelMetaPointer;
                 while (channelAddress != 0)
                 {
                     var tmp = ReadChannel(reader, channelAddress);
                     channels.Add(tmp);
                     channelAddress = tmp.NextMetaAddress;
                 }
-                return true;
+
+                foreach (var channel in channels)
+                {
+                    channel.Data = ReadChannelData( reader, channel);
+                    if (channel.Data.Count != channel.DataLength)
+                    {
+                        Console.WriteLine($"{channel.Name} - Data length doesn't match! expected {channel.DataLength} got {channel.Data.Count}");
+                    }    
+                }
+                fs.Close();
+                reader.Close();
+                return JsonSerializer.Serialize(channels);
+
             }
-            catch
+            catch (Exception ex)
             {
-                return false;
+                return ex.ToString();
             }
         }
 
+
+        //  I need to completely restructure these classes, I've already got an idea in mind for this
         private bool ReadHeader(BinaryReader reader)
         {
             try
@@ -113,16 +134,16 @@ namespace LDParse
             }
         }
 
-        private LDParse.Classes.Channel ReadChannel(BinaryReader reader, ushort channelAddress)
+        private LDParse.Classes.Channel ReadChannel(BinaryReader reader, UInt32 channelAddress)
         {
             try
             {
                 LDParse.Classes.Channel channel = new LDParse.Classes.Channel();
                 reader.BaseStream.Seek(channelAddress, SeekOrigin.Begin);
-                channel.PreviousMetaAddress = BinaryPrimitives.ReadUInt16LittleEndian(reader.ReadBytes(4));
-                channel.NextMetaAddress = BinaryPrimitives.ReadUInt16LittleEndian(reader.ReadBytes(4));
-                channel.DataAddress = BinaryPrimitives.ReadUInt16LittleEndian(reader.ReadBytes(4));
-                channel.DataLength = BinaryPrimitives.ReadUInt16LittleEndian(reader.ReadBytes(4));
+                channel.PreviousMetaAddress = BinaryPrimitives.ReadUInt32LittleEndian(reader.ReadBytes(4));
+                channel.NextMetaAddress = BinaryPrimitives.ReadUInt32LittleEndian(reader.ReadBytes(4));
+                channel.DataAddress = BinaryPrimitives.ReadUInt32LittleEndian(reader.ReadBytes(4));
+                channel.DataLength = BinaryPrimitives.ReadUInt32LittleEndian(reader.ReadBytes(4));
                 reader.BaseStream.Seek(2, SeekOrigin.Current);
                 channel.DataType = BinaryPrimitives.ReadUInt16LittleEndian(reader.ReadBytes(2));
                 channel.DataType2 = BinaryPrimitives.ReadUInt16LittleEndian(reader.ReadBytes(2));
@@ -142,6 +163,19 @@ namespace LDParse
             {
                 return null;
             }
+        }
+
+        private List<float> ReadChannelData(BinaryReader reader, LDParse.Classes.Channel channel)
+        {
+            reader.BaseStream.Seek(channel.DataAddress, SeekOrigin.Begin);
+            List<float> data = new List<float>();
+
+            for (int i = 1; i <= channel.DataLength; i++)
+            {
+                data.Add((reader.ReadSingle() / channel.Scale * MathF.Pow(10, channel.DecPlaces) + channel.Shift) * channel.Mul);
+            }
+
+            return data;
         }
 
         private string GetStringFromChars(char[] charArray)
